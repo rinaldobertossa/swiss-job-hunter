@@ -76,7 +76,7 @@ def get_jobs_query(status: str = "all", q: str = "", direction: str = "all", min
         if status != "all":
             query = query.filter(Job.status == status)
         if direction != "all":
-            query = query.filter(or_(Job.direction == direction, Job.direction.is_(None)))
+            query = query.filter(Job.direction == direction)
         if source != "all":
             query = query.filter(Job.source == source)
         if q:
@@ -242,11 +242,13 @@ async def run_search(req: SearchRequest):
     async def gen():
         from scrapers import SCRAPER_REGISTRY
         from dedup.exact import get_or_create_job, is_exact_duplicate
+        from analyzer.scorer import resolve_direction
         from db import init_db
         from db.models import RawJob
         from db.session import get_session
         init_db()
 
+        direction = resolve_direction(req.direction)
         kw_list = req.keywords if req.keywords else [req.keyword]
         if not req.sources:
             yield "✗ No sources selected"
@@ -275,7 +277,7 @@ async def run_search(req: SearchRequest):
                         try:
                             if is_exact_duplicate(scraped.title, scraped.company, scraped.location):
                                 continue
-                            job, created = get_or_create_job(scraped, direction=req.direction or None)
+                            job, created = get_or_create_job(scraped, direction=direction)
                             if created:
                                 try:
                                     with get_session() as session:
@@ -520,15 +522,22 @@ async def run_analyze(req: AnalyzeRequest):
     async def gen():
         import asyncio
         from asyncio import Queue
-        from analyzer.scorer import fast_score, llm_score, load_cv_text, load_cv_keywords
+        from analyzer.scorer import (
+            fast_score, llm_score, load_cv_text, load_cv_keywords,
+            cv_path_for, resolve_direction,
+        )
         from db.models import Job, JobStatus
         from db.session import get_session
 
+        direction = resolve_direction(req.direction)
         try:
-            cv_text = load_cv_text(direction=req.direction or None)
+            cv_text = load_cv_text(direction=direction)
         except FileNotFoundError as e:
             yield f"✗ {e}"
             return
+        yield f"→ Scoring with CV: {cv_path_for(direction)}" + (
+            f" (direction: {direction})" if direction else ""
+        )
 
         with get_session() as session:
             statuses = list(JobStatus)  # all statuses when rescoring
@@ -553,7 +562,7 @@ async def run_analyze(req: AnalyzeRequest):
         if req.llm:
             # Load dynamic CV keywords once for pre-filter (cached per CV file)
             yield f"→ Loading CV keywords for pre-filter..."
-            cv_keywords = await load_cv_keywords(cv_text, direction=req.direction or None)
+            cv_keywords = await load_cv_keywords(cv_text, direction=direction)
             yield f"→ Loaded {len(cv_keywords)} keywords, pre-filter threshold: {req.min_keyword_score:.0%}"
 
             queue: Queue = Queue()
